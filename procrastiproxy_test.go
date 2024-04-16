@@ -1,51 +1,114 @@
 package procrastiproxy_test
 
 import (
+	"bytes"
 	"errors"
+	"io"
 	"net"
 	"net/http"
+	"net/http/httptest"
+	"net/url"
+	"strings"
 	"testing"
 
-	procrastiproxy "github.com/laychopy/procastiproxy"
+	"github.com/laychopy/procrastiproxy"
 )
 
-// TODO: REFACTOR AND PROXY REQUEST
-// TODO: ADD TESTS FOR PROXY SERVER
-// Your tests go here!
-func TestProxyServerRespondsWithStatusForbiddenRunningOnAddress(t *testing.T) {
+func TestProxyServerAllowsAllRequestsByDefault(t *testing.T) {
 	t.Parallel()
-	server := procrastiproxy.NewServer()
-	address, err := procrastiproxy.ListenTCP(":0")
-	defer server.Close()
-	// start proxy server
-	go func(address net.Listener, server *http.Server) {
-		err = procrastiproxy.Serve(server, address)
-		if err != nil && !errors.Is(err, http.ErrServerClosed) {
-			t.Errorf("Error starting proxy server: %v", err)
-		}
-	}(address, server)
+	ts := newTestServer(t)
+	_, client := newTestProxyAndClient(t)
+	requestIsAllowed(t, client, ts.URL)
+}
 
-	// make request to proxy server
-	response, err := http.Get("http://" + address.Addr().String())
+func TestProxyServerDeniesRequestsToBlockedURLs(t *testing.T) {
+	t.Parallel()
+	ts := newTestServer(t)
+	proxy, client := newTestProxyAndClient(t)
+	proxy.Block(strings.TrimPrefix(ts.URL, "http://"))
+	requestIsDenied(t, client, ts.URL)
+}
 
-	// assert err is nil
+func newTestServer(t *testing.T) *httptest.Server {
+	t.Helper()
+	want := []byte("Hello, world")
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write(want)
+	}))
+	t.Cleanup(ts.Close)
+	resp, err := http.Get(ts.URL)
 	if err != nil {
-		t.Fatalf("Error making request to proxy server: %v", err)
+		t.Fatal(err)
 	}
-	// assert response status code is 403
-	if response.StatusCode != http.StatusForbidden {
-		t.Fatalf("Expected status code 403, got %v", response.StatusCode)
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatal(resp.StatusCode)
+	}
+	got, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got, want) {
+		t.Errorf("want %q, got %q", want, got)
+	}
+	return ts
+}
+
+func requestIsAllowed(t *testing.T, client *http.Client, link string) {
+	t.Helper()
+	resp, err := client.Get(link)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		t.Fatal(resp.StatusCode)
+	}
+	want := []byte("Hello, world")
+	got, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got, want) {
+		t.Errorf("want %q, got %q", want, got)
 	}
 }
 
-//func TestScript(t *testing.T) {
-//	testscript.Run(t, testscript.Params{
-//		Dir: "testdata/scripts",
-//	})
-//}
+func requestIsDenied(t *testing.T, client *http.Client, link string) {
+	t.Helper()
+	resp, err := client.Get(link)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != http.StatusForbidden {
+		t.Fatal(resp.StatusCode)
+	}
+}
 
-//func TestMain(m *testing.M) {
-//	os.Exit(testscript.RunMain(m, map[string]func() int{
-//		"procrastiproxy": procrastiproxy.Main,
-//	}))
-//}
+func newTestProxyAndClient(t *testing.T) (*procrastiproxy.ProxyServer, *http.Client) {
+	proxy := procrastiproxy.NewServer(randomFreePortAddr(t))
+	t.Cleanup(func() { proxy.Close() })
+	go func() {
+		err := proxy.ListenAndServe()
+		if err != nil && !errors.Is(err, http.ErrServerClosed) {
+			t.Error(err)
+		}
+	}()
+	return proxy, &http.Client{
+		Transport: &http.Transport{
+			Proxy: http.ProxyURL(&url.URL{
+				Scheme: "http",
+				Host:   proxy.Addr,
+			}),
+		},
+	}
+}
+
+func randomFreePortAddr(t *testing.T) string {
+	t.Helper()
+	l, err := net.Listen("tcp", ":0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer l.Close()
+	return l.Addr().String()
+}

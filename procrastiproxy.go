@@ -2,43 +2,61 @@ package procrastiproxy
 
 import (
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 )
 
 type ProxyServer struct {
+	Addr     string
 	server   *http.Server
 	listener net.Listener
+	blocked  map[string]bool
 }
 
-func NewServer() *http.Server {
-	return &http.Server{
+func NewServer(addr string) *ProxyServer {
+	p := &ProxyServer{
+		Addr:    addr,
+		blocked: map[string]bool{},
+	}
+	p.server = &http.Server{
+		Addr: addr,
 		Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			w.WriteHeader(http.StatusForbidden)
+			if p.Deny(r.Host) {
+				w.WriteHeader(http.StatusForbidden)
+				return
+			}
+			resp, err := http.Get(r.RequestURI)
+			if err != nil {
+				w.WriteHeader(http.StatusBadRequest)
+				fmt.Fprintln(w, err)
+			}
+			defer resp.Body.Close()
+			w.WriteHeader(resp.StatusCode)
+			io.Copy(w, resp.Body)
 		}),
 	}
+	return p
 }
 
-func ListenTCP(address string) (net.Listener, error) {
-	return net.Listen("tcp", address)
+func (p *ProxyServer) Block(link string) {
+	p.blocked[link] = true
 }
 
-func Serve(server *http.Server, listener net.Listener) error {
-	println("Starting server on port", listener.Addr().String())
-	return server.Serve(listener)
+func (p *ProxyServer) Close() error {
+	return p.server.Close()
 }
 
-func ListenAndServe(address string) error {
-	listener, err := ListenTCP(address)
-	if err != nil {
-		return err
-	}
+func (p *ProxyServer) Deny(link string) bool {
+	return p.blocked[link]
+}
 
-	return Serve(NewServer(), listener)
+func (p *ProxyServer) ListenAndServe() error {
+	return p.server.ListenAndServe()
 }
 
 func Main() int {
-	err := ListenAndServe(":0")
+	err := NewServer(":0").ListenAndServe()
 	if err != nil {
 		fmt.Printf("Error starting proxy server: %v", err)
 		return 1
