@@ -1,3 +1,11 @@
 package main
 
-// Your CLI goes here!
+import (
+	"os"
+
+	"github.com/laychopy/procastiproxy"
+)
+
+func main() {
+	os.Exit(procrastiproxy.Main())
+}
